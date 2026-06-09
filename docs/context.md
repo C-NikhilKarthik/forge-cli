@@ -38,15 +38,26 @@ keep versus a folder of shell scripts.
 ML engineers and researchers who rent GPUs on demand (Vast.ai, RunPod, Lambda)
 and want their local-dev ergonomics on remote hardware without babysitting it.
 
-## Why Rust
+## Why C++ (for now)
 
-- First-class CLI ecosystem (`clap`, `indicatif`) and the same neighborhood as
-  the tools this wants to feel like (`cargo`, `uv`, `mise`, `atuin`).
-- Strong types make the provider abstraction clean; `serde` makes API + config
-  handling cheap.
-- `tokio` for async HTTP/polling; shell out to `ssh`/`rsync`/`code` rather than
-  reimplementing them.
-- Ships as a single binary — trivial cross-platform distribution.
+The first implementation is **C++17**, chosen deliberately as a learning vehicle:
+a language we already know, used to get hands-on with low-level systems
+programming — process spawning (`fork`/`exec`/`posix_spawn`), BSD sockets,
+file descriptors, `errno` handling, and RAII for resource hygiene.
+
+- C++ keeps us close to the metal for the systems-y parts (which is the goal)
+  while sparing us C's manual JSON/string boilerplate via mature header-only libs
+  (nlohmann/json, toml++, CLI11, fmt).
+- RAII teaches the core discipline — a libcurl handle, socket fd, or file handle
+  that releases itself — without a borrow checker.
+- The only real dependency is libcurl; everything else is vendored single
+  headers, so the build is one `make`.
+- Shells out to `ssh`/`rsync`/`code` rather than reimplementing them.
+
+**A Rust port is the planned destination.** The architecture is kept
+port-friendly (the `Provider` abstract base class → a Rust trait; RAII → `Drop`;
+exceptions → `Result`). Doing C++ first, then porting, is itself a great way to
+learn both ecosystems against the same problem.
 
 ## Provider landscape
 
@@ -56,7 +67,7 @@ and want their local-dev ergonomics on remote hardware without babysitting it.
 | RunPod | clean REST (`POST /v1/pods`) | Simplest API; good second provider |
 | Lambda | simple REST (launch/terminate + SSH keys) | Fixed instance types, often capacity-constrained |
 
-Forge hides these behind one `Provider` trait (see [plan.md](plan.md)), so the
+Forge hides these behind one `Provider` abstraction (see [plan.md](plan.md)), so the
 CLI surface is identical regardless of where the machine runs.
 
 ## Design principles

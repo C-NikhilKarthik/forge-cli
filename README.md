@@ -16,7 +16,8 @@ forge ls            # what's running, and what it's costing
 forge rm train      # tear it down
 ```
 
-Built in Rust — a single static binary, no runtime to install.
+Built in C++17 — a single binary, shells out to `ssh`/`rsync`/`code`. (A Rust
+port is planned once the surface stabilizes.)
 
 ## Status
 
@@ -28,10 +29,11 @@ auto-shutdown, more providers).
 ## Install
 
 > Not yet published. For now, build from source — see
-> [CONTRIBUTING.md](CONTRIBUTING.md).
+> [CONTRIBUTING.md](CONTRIBUTING.md). You'll need a C++17 compiler, `make`, and
+> libcurl.
 
 ```bash
-cargo install --path .
+make            # produces ./forge
 ```
 
 ## Quickstart

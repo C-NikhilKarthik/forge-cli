@@ -5,8 +5,8 @@ first, then jump to the doc you need.
 
 ## What is this
 
-Forge is a Rust CLI for managing remote GPU machine lifecycles across cloud
-providers. The north-star experience: `forge up <name>` → `forge code <name>`
+Forge is a C++17 CLI for managing remote GPU machine lifecycles across cloud
+providers (a Rust port is planned later). The north-star experience: `forge up <name>` → `forge code <name>`
 puts you in VS Code on a freshly booted GPU in under two minutes. See
 [context.md](context.md) for the why.
 
@@ -42,11 +42,16 @@ forge-cli/
 ├── README.md
 ├── CONTRIBUTING.md
 ├── LICENSE
-├── Cargo.toml
+├── Makefile
 ├── docs/                # you are here
 │   ├── index.md  context.md  plan.md  conventions.md
+├── third_party/         # vendored single-header libs (json, toml++, CLI11, fmt)
+├── include/forge/       # headers: provider.hpp, http.hpp, config.hpp, ssh.hpp, …
 └── src/
-    ├── main.rs  cli.rs  error.rs  config.rs  state.rs  ssh.rs  vscode.rs
-    ├── commands/        # up.rs ls.rs ssh.rs code.rs rm.rs
-    └── providers/       # mod.rs (trait) + vast.rs
+    ├── main.cpp  cli.cpp  config.cpp  state.cpp  ssh.cpp  vscode.cpp  http.cpp
+    ├── commands/        # up.cpp ls.cpp ssh.cpp code.cpp rm.cpp
+    └── providers/       # vast.cpp (VastProvider : Provider)
 ```
+
+Implementation language is **C++17** (Makefile build); a Rust port is planned
+later. See [context.md](context.md) → *Why C++*.

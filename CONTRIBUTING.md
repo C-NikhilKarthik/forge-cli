@@ -12,26 +12,32 @@ help is to build the [v0.1 milestone](docs/plan.md) and report rough edges.
 
 ## Dev setup
 
-1. **Install Rust** (stable) via [rustup](https://rustup.rs):
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
+1. **C++17 toolchain + make:**
+   - macOS: `xcode-select --install` (gives `clang++`, `make`, and the libcurl
+     headers in the SDK). Optionally `brew install curl` for a newer libcurl.
+   - Linux: `sudo apt install build-essential libcurl4-openssl-dev`
+     (or your distro's equivalent for `g++`, `make`, and libcurl dev headers).
 2. **System tools on `PATH`:** `ssh`, `ssh-keygen`, `rsync`, and `code` (the VS
    Code CLI). Forge shells out to these.
-3. **Vast.ai credentials** (for end-to-end work): grab an API key from your
+3. **Vendored libraries** live under `third_party/` (committed single headers:
+   nlohmann/json, toml++, CLI11, fmt) — nothing to install.
+4. **Vast.ai credentials** (for end-to-end work): grab an API key from your
    [account keys page](https://cloud.vast.ai/account/) and set
    `export VAST_API_KEY=...` (or add it to `~/.config/forge/config.toml`).
 
 ## Build, run, check
 
 ```bash
-cargo build                       # compile
-cargo run -- --help               # run the CLI
-cargo run -- up test              # exercise a command
-cargo fmt                         # format (run before committing)
-cargo clippy --all-targets        # lint (CI fails on warnings)
-cargo test                        # unit tests (offline; no spend)
+make                              # compile → ./forge
+./forge --help                    # run the CLI
+./forge up test                   # exercise a command
+make format                       # clang-format (run before committing)
+make clean                        # remove build artifacts
 ```
+
+The build must be **warning-clean** (`-Wall -Wextra -Wpedantic`). Run under
+`valgrind` or AddressSanitizer occasionally to confirm the RAII wrappers (curl
+handle, sockets, fds) leak nothing.
 
 ## A note on cost
 
@@ -43,16 +49,15 @@ loop:
 - and **verify in the [Vast console](https://cloud.vast.ai/instances/)** that the
   instance is actually gone.
 
-Live-API tests are gated behind an env flag and `#[ignore]`d so the default
-`cargo test` run stays offline and free.
+Live-API tests are gated behind an env flag so the default test run stays
+offline and free.
 
 ## Pull requests
 
 1. Branch off `main`.
 2. Keep PRs focused — one logical change. Update [docs/plan.md](docs/plan.md) in
    the same PR when behavior or scope changes.
-3. Before pushing: `cargo fmt && cargo clippy --all-targets && cargo test` all
-   clean.
+3. Before pushing: `make format && make` clean (warning-free), and tests pass.
 4. Write a clear description: what changed, why, and how you verified it
    (especially for anything that touches live instances or `~/.ssh/config`).
 

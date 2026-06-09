@@ -1,8 +1,13 @@
 # Forge — plan & roadmap
 
 Living document. **v0.1** is the active milestone; later phases are sketched at
-the end and share the same `Provider` trait. This is the source of truth for
-scope — don't expand beyond the current phase without updating it here first.
+the end and share the same `Provider` abstraction. This is the source of truth
+for scope — don't expand beyond the current phase without updating it here first.
+
+> **Implementation language: C++17**, built with a hand-written Makefile. This
+> is a deliberate learning choice (low-level systems work in a language we know),
+> with a planned eventual port to Rust. The architecture is kept port-friendly:
+> the `Provider` abstract base class maps directly onto a Rust trait later.
 
 ## v0.1 scope (active)
 
@@ -17,51 +22,78 @@ forge rm train    (tear it down)
 Includes SSH-key provisioning and `~/.ssh/config` management. **Excludes** sync,
 templates, workflows, TTL, and other providers (see roadmap).
 
-### Prerequisite
+### Prerequisites
 
-`cargo`/`rustc` are installed via [rustup](https://rustup.rs). `rsync`, `code`,
-and `ssh` must be on `PATH` (Forge shells out to them).
+- A C++17 compiler (`clang++` on macOS, `g++` on Linux) and `make`.
+- **libcurl** dev headers/lib (`-lcurl`) on the system.
+- `ssh`, `ssh-keygen`, `rsync`, and `code` (the VS Code CLI) on `PATH` — Forge
+  shells out to them.
+
+## Systems concepts you'll touch (the point of doing this in C++)
+
+| Concept | Where it shows up |
+|---|---|
+| Process spawning & lifecycle | `fork`/`execvp`/`waitpid` and `posix_spawn` to run `ssh-keygen`, `rsync`, `code`; bare `execvp` (no fork) for `forge ssh` so ssh takes over the terminal |
+| BSD sockets | SSH readiness probe: `getaddrinfo` → `socket` → non-blocking `connect` + `poll` with a timeout |
+| File descriptors & RAII | wrapping `CURL*`, socket fds, and file handles in classes that clean up in their destructor |
+| `errno` / return-code handling | converting failed syscalls into exceptions with context |
+| Filesystem & XDG paths | `std::filesystem` + `getenv` to resolve `~/.config`, `~/.local/share`, `~/.ssh` |
 
 ## Architecture
 
-A **single binary crate** with modules (a multi-crate workspace is premature;
-revisit if providers grow). Layout:
+A **single binary** built from modular translation units. Layout:
 
 ```
-src/
-├── main.rs            # tokio entry, clap dispatch, tracing init
-├── cli.rs             # clap derive: Cli + Commands enum
-├── error.rs           # thiserror error types (provider/io/config)
-├── config.rs          # ~/.config/forge/config.toml (api keys, defaults)
-├── state.rs           # ~/.local/share/forge/state.json (name → instance)
-├── ssh.rs             # keygen + ~/.ssh/config managed blocks + readiness probe
-├── vscode.rs          # `code --remote ssh-remote+<name>` launcher
-├── commands/          # one file per subcommand (up/ls/ssh/code/rm)
-│   ├── up.rs  ls.rs  ssh.rs  code.rs  rm.rs
-└── providers/
-    ├── mod.rs         # `Provider` trait (async-trait) + shared structs
-    └── vast.rs        # VastProvider: reqwest client over the API below
+forge-cli/
+├── Makefile
+├── third_party/              # vendored single-header libraries (committed)
+│   ├── json.hpp              # nlohmann/json
+│   ├── toml.hpp              # toml++ (toml11/marzer toml++)
+│   ├── CLI11.hpp             # CLI11 argument parser
+│   └── fmt/                  # fmtlib, header-only mode
+├── include/forge/            # public headers (.hpp)
+│   ├── cli.hpp  config.hpp  state.hpp  ssh.hpp  vscode.hpp  http.hpp
+│   ├── error.hpp             # ForgeError (std::runtime_error) hierarchy
+│   ├── provider.hpp          # abstract Provider + neutral structs
+│   └── providers/vast.hpp
+└── src/
+    ├── main.cpp              # parse args, dispatch, top-level try/catch
+    ├── cli.cpp               # CLI11 setup: subcommands + flags
+    ├── config.cpp state.cpp ssh.cpp vscode.cpp http.cpp
+    ├── commands/             # one .cpp per subcommand
+    │   ├── up.cpp ls.cpp ssh.cpp code.cpp rm.cpp
+    └── providers/
+        └── vast.cpp          # VastProvider : Provider
 ```
 
-### Crates
+Dependency direction is one-way: `main → cli → commands → {providers, config,
+state, ssh, vscode, http}`. Leaf utilities don't depend on `commands/`.
 
-| Crate | Use |
-|---|---|
-| `clap` (derive) | CLI parsing/help |
-| `tokio` (rt-multi-thread, macros) | async runtime |
-| `reqwest` (json, rustls-tls) | HTTP to Vast API |
-| `serde`, `serde_json` | (de)serialize API + state.json |
-| `toml` | `config.toml` parsing |
-| `anyhow` | app-level error context (main/commands) |
-| `thiserror` | typed errors in `providers`/`ssh` |
-| `async-trait` | object-safe async `Provider` trait for `dyn` dispatch |
-| `indicatif` | spinner while instance boots / SSH comes up |
-| `directories` | XDG-correct config/state/cache paths |
-| `comfy-table` | `forge ls` table output |
-| `tracing` + `tracing-subscriber` | `-v` debug logging |
+### Libraries
 
-> Avoid `serde_yaml` (unmaintained/archived). YAML isn't needed in v0.1; when
-> templates land, use `serde_yaml_ng`.
+| Concern | Choice | Notes |
+|---|---|---|
+| Arg parsing | **CLI11** (vendored header) | clean subcommands + flags |
+| HTTP | **libcurl** (system, `-lcurl`) | wrap `CURL*` in an RAII `HttpClient` |
+| JSON | **nlohmann/json** (vendored header) | parse API responses, (de)serialize state.json |
+| TOML config | **toml++** (vendored header) | parse `config.toml` |
+| Formatting/printing | **fmt** (vendored, `FMT_HEADER_ONLY`) | nicer than iostreams; `std::format` is C++20 |
+| Process / sockets / fs | POSIX + libstdc++ | `<spawn.h>`, `<unistd.h>`, `<sys/socket.h>`, `<netdb.h>`, `<poll.h>`, `std::filesystem` |
+
+Vendoring the header-only libs (committed under `third_party/`) keeps the build
+a single `make` with no package manager. The only external link dependency is
+`libcurl`.
+
+### Errors
+
+- A small exception hierarchy in `error.hpp`: `ForgeError : std::runtime_error`,
+  with `ApiError`, `NotFound`, `Timeout`, `ConfigError` subclasses for cases
+  callers branch on (parallels Rust's `thiserror`).
+- Commands throw on failure; `main.cpp` has a single top-level `try/catch` that
+  prints a clean, actionable message and returns a non-zero exit code (parallels
+  `anyhow` at the app edge).
+- At syscall boundaries, check the return value, capture `errno`, and throw a
+  `ForgeError` with context (`fmt::format("ssh-keygen failed: {}", strerror(errno))`).
 
 ## Vast.ai API reference
 
@@ -91,7 +123,8 @@ src/
 
 ## Data model
 
-**`config.toml`** (`directories::ProjectDirs("ai","forge","forge").config_dir()`):
+**`config.toml`** at `$XDG_CONFIG_HOME/forge/config.toml` (else
+`~/.config/forge/config.toml`):
 
 ```toml
 [vast]
@@ -103,8 +136,10 @@ disk    = 40              # GB
 max_dph = 0.5             # $/hr ceiling for offer search
 ```
 
-**`state.json`** (data_dir) — local source of truth mapping friendly name →
-provider instance. Lets `forge ssh train` work without a provider round-trip:
+**`state.json`** at `$XDG_DATA_HOME/forge/state.json` (else
+`~/.local/share/forge/state.json`) — local source of truth mapping a friendly
+name → provider instance. Lets `forge ssh train` work without a provider
+round-trip:
 
 ```json
 { "machines": { "train": {
@@ -114,25 +149,40 @@ provider instance. Lets `forge ssh train` work without a provider round-trip:
     "created_at": "2026-06-09T...", "status": "running" } } }
 ```
 
-## Provider trait (`providers/mod.rs`)
+## Provider abstraction (`include/forge/provider.hpp`)
 
-```rust
-#[async_trait]
-pub trait Provider {
-    async fn search_offers(&self, req: &OfferQuery) -> Result<Vec<Offer>>;
-    async fn create(&self, offer_id: u64, spec: &CreateSpec) -> Result<u64>; // instance id
-    async fn list(&self) -> Result<Vec<Instance>>;
-    async fn get(&self, id: u64) -> Result<Instance>;
-    async fn stop(&self, id: u64) -> Result<()>;
-    async fn destroy(&self, id: u64) -> Result<()>;
-    async fn attach_ssh_key(&self, id: u64, pubkey: &str) -> Result<()>;
-}
+Provider-neutral structs + an abstract base class; `VastProvider` maps Vast's
+JSON onto the structs. This is the seam a Rust `trait` would later replace.
+
+```cpp
+struct Offer    { uint64_t id; std::string gpu_name; int num_gpus;
+                  double dph_total, reliability; std::string geolocation; };
+struct Instance { uint64_t id; std::string status, ssh_host, public_ip,
+                  gpu_name, label; int ssh_port; double dph_total; };
+struct CreateSpec { std::string image, label, onstart; int disk; };
+struct OfferQuery { std::string gpu; int num_gpus; double max_dph, min_reliability; };
+
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::vector<Offer>    search_offers(const OfferQuery&)            = 0;
+    virtual uint64_t              create(uint64_t offer_id, const CreateSpec&)= 0;
+    virtual std::vector<Instance> list()                                      = 0;
+    virtual Instance              get(uint64_t id)                            = 0;
+    virtual void                  stop(uint64_t id)                           = 0;
+    virtual void                  destroy(uint64_t id)                        = 0;
+    virtual void                  attach_ssh_key(uint64_t id,
+                                                 const std::string& pubkey)   = 0;
+};
 ```
 
-`Offer`, `Instance`, `CreateSpec`, `OfferQuery` are provider-neutral structs;
-`vast.rs` maps Vast's JSON onto them. Adding RunPod/Lambda later = one new file
-implementing the trait, dispatched via `Box<dyn Provider>` keyed on
-`state.machines[name].provider`.
+Construction returns `std::unique_ptr<Provider>`, chosen from
+`state.machines[name].provider`. Adding RunPod/Lambda later = one new
+`Provider` subclass.
+
+`HttpClient` (in `http.hpp`) wraps a `CURL*` (RAII) and exposes
+`get/post/put/del(path, json_body)` returning `{long status, json body}`, with
+the bearer header set once.
 
 ## Command behavior (v0.1)
 
@@ -140,40 +190,42 @@ implementing the trait, dispatched via `Box<dyn Provider>` keyed on
 1. Refuse if `<name>` already in `state.json` (suggest `forge rm` first).
 2. `search_offers` with filters from flags/config defaults → pick cheapest
    reliable offer (print which: gpu, $/hr, location).
-3. Ensure local keypair `~/.ssh/forge_<name>` (`ssh-keygen -t ed25519 -N "" -f
-   …`, only if missing).
+3. Ensure local keypair `~/.ssh/forge_<name>` — spawn `ssh-keygen -t ed25519 -N
+   "" -f …` (via `posix_spawn`/`fork`+`exec`), only if missing.
 4. `create(offer_id, spec)` with `runtype:"ssh"`, `label:"forge-<name>"`.
-5. **Boot wait** (indicatif spinner): poll `get(id)` until
-   `actual_status == "running"` AND `ssh_host`/`ssh_port` are populated (timeout
-   ~5 min; on timeout leave instance running so the user can retry/inspect).
+5. **Boot wait** (spinner): poll `get(id)` on an interval until `actual_status
+   == "running"` AND `ssh_host`/`ssh_port` are populated (timeout ~5 min; on
+   timeout leave the instance running so the user can retry/inspect).
 6. `attach_ssh_key(id, <pubkey>)`.
-7. **SSH readiness probe** (`ssh.rs`): TCP-connect to `ssh_host:ssh_port` and/or
-   `ssh -o BatchMode=yes … true` with short retries until it answers.
+7. **SSH readiness probe** (`ssh.cpp`): TCP-connect to `ssh_host:ssh_port` via
+   sockets (non-blocking `connect` + `poll`), retry until it answers.
 8. Write managed `~/.ssh/config` block (below).
 9. Persist to `state.json`. Print: `✓ train ready → forge code train`.
 
 **`forge ls`** — `provider.list()`, reconcile with `state.json` (flag drift:
-locally-known machines missing remotely, or unmanaged remote instances). Render
-table: NAME, STATUS, GPU, $/HR, SSH, AGE.
+locally-known machines missing remotely, or unmanaged remote instances). Print a
+hand-formatted table: NAME, STATUS, GPU, $/HR, SSH, AGE.
 
-**`forge ssh <name>`** — look up `state.json`, replace the process with `ssh
-<name>` (using the config entry); fall back to explicit `ssh -i key -p port
-root@host`.
+**`forge ssh <name>`** — look up `state.json`, then `execvp("ssh", {"ssh",
+name})` so ssh replaces the Forge process and owns the terminal; fall back to
+explicit `ssh -i key -p port root@host`.
 
-**`forge code <name>`** — ensure `~/.ssh/config` entry exists, then `code
+**`forge code <name>`** — ensure `~/.ssh/config` entry exists, then spawn `code
 --remote ssh-remote+<name> /workspace` (default remote dir configurable).
 
 **`forge rm <name> [--keep-key]`** — `provider.destroy(id)`, remove the
 `~/.ssh/config` managed block, drop from `state.json`, optionally delete the
 keypair. Confirm before destroy unless `--yes`.
 
-## SSH key + `~/.ssh/config` strategy (`ssh.rs`)
+## SSH key + `~/.ssh/config` strategy (`ssh.cpp`)
 
 - **Keys:** dedicated per-machine `~/.ssh/forge_<name>` (+`.pub`), ed25519,
-  generated by shelling out to `ssh-keygen` (no native crypto dep). The public
-  key is what we `attach_ssh_key` to the instance.
+  generated by spawning `ssh-keygen` (no crypto lib). The public key is what we
+  `attach_ssh_key` to the instance.
 - **Config:** write an **idempotent managed block** delimited by markers so we
-  update/remove cleanly without clobbering the user's file:
+  update/remove cleanly without clobbering the user's file. Implementation: read
+  the file, splice out any existing `# >>> forge:<name> >>>` … `# <<< … <<<`
+  region, append the fresh block, write atomically (write temp + `rename`):
 
   ```
   # >>> forge:train >>>
@@ -190,9 +242,17 @@ keypair. Confirm before destroy unless `--yes`.
   Vast often rotates `ssh_host`/`ssh_port` between stop/start, so the block is
   rewritten on every `up`. `accept-new` avoids host-key prompts on fresh boxes.
 
+## Build (Makefile)
+
+- `clang++`/`g++` with `-std=c++17 -Wall -Wextra -Wpedantic -O2 -g`, includes
+  `-Iinclude -Ithird_party`, links `-lcurl`.
+- Compile each `src/**/*.cpp` → `build/*.o`, link into `./forge`.
+- Targets: `all` (default), `clean`, `run` (`./forge`), `format` (clang-format),
+  optionally `tidy` (clang-tidy).
+
 ## Verification (end-to-end, against a real account)
 
-1. **Build:** `cargo build` clean; `cargo run -- --help` lists commands.
+1. **Build:** `make` produces `./forge`; `./forge --help` lists commands.
 2. **Auth/offers (no spend):** confirm `search_offers` returns real offers and we
    pick a sane one. Add a hidden `forge offers --gpu RTX_4090` debug subcommand,
    or `-v` log the chosen offer before create.
@@ -200,25 +260,28 @@ keypair. Confirm before destroy unless `--yes`.
    few minutes → `forge ls` shows it → `forge ssh test` opens a shell → `forge
    code test` opens VS Code remote → `forge rm test` destroys it. **Confirm in
    the Vast console it's gone.**
-4. **Idempotency/edges:** `forge up test` twice (second errors cleanly); `forge
-   ssh missing` (clean "unknown machine"); Ctrl-C during boot wait leaves a
-   recoverable state.
+4. **Edges:** `forge up test` twice (second errors cleanly); `forge ssh missing`
+   (clean "unknown machine"); Ctrl-C during boot wait leaves a recoverable state.
+5. **Hygiene:** build is warning-clean; run under `valgrind`/ASan once to confirm
+   no leaks in the curl/socket/fd RAII wrappers.
 
-## Roadmap (post-v0.1 — same trait, layered on)
+## Roadmap (post-v0.1 — same abstraction, layered on)
 
-- **Sync:** `forge sync <name>` → `rsync` over the SSH config entry (`--exclude
-  .git/__pycache__`); `forge watch` adds a debounced file-watch loop.
+- **Sync:** `forge sync <name>` → spawn `rsync` over the SSH config entry
+  (`--exclude .git/__pycache__`); `forge watch` adds a debounced file-watch loop
+  (`kqueue` on macOS / `inotify` on Linux — more good systems learning).
 - **Templates:** `.forge/<name>.yaml` (provider/gpu/image/setup/ports/ttl) read
-  by `up` (`serde_yaml_ng`).
+  by `up`.
 - **Workflows:** map declarative `setup/datasets/checkpoints/run` into the Vast
   `onstart` script (≤4048 chars) or a generated remote bootstrap; `forge run
   <name>` + `forge logs <name>` (tmux/journalctl/docker logs).
 - **TTL:** `--ttl 8h` in state; a background reconciler (or installed cron)
   auto-stops past-deadline machines.
-- **More providers:** `runpod.rs` (`POST https://rest.runpod.io/v1/pods`),
-  `lambda.rs`, `local.rs` (mock for tests).
-- **Release:** GitHub Actions cross-compile → macOS (aarch64/x86_64), Linux
-  (x86_64-gnu), Windows (x86_64-msvc).
+- **More providers:** RunPod (`POST https://rest.runpod.io/v1/pods`), Lambda, a
+  local mock for tests.
+- **Eventual Rust port:** once the surface stabilizes, port module-by-module;
+  the `Provider` base class becomes a trait, RAII wrappers become `Drop`,
+  exceptions become `Result`.
 
 ## Risks / notes
 
@@ -226,3 +289,5 @@ keypair. Confirm before destroy unless `--yes`.
   live response before wiring `create` — log the raw response once during step-2.
 - Vast stop/start may not preserve the SSH endpoint; v0.1 treats `rm` as destroy
   and rewrites SSH config on every `up`, sidestepping the stop/start ambiguity.
+- macOS ships libcurl but headers come from the Xcode Command Line Tools (or
+  Homebrew `curl`); CONTRIBUTING covers setup.
